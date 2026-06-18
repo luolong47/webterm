@@ -18,20 +18,24 @@
 
 ## 安全模型
 
-默认只监听 `127.0.0.1:7681`，**应用内不写认证**。要远程访问，走 SSH 隧道：
+默认只监听 `127.0.0.1:7681`。可选 `--password` 参数启用 WebSocket 层密码认证：
+浏览器打开页面后需输入密码才能获取终端会话，防止同机其他用户直接访问。
+
+要远程访问，配合 SSH 隧道：
 
 ```bash
 ssh -L 7681:127.0.0.1:7681 user@server   # 然后本地浏览器开 http://localhost:7681
 ```
 
-由 SSH 兜底身份认证，最简单也最安全。
+
 
 ## 编译与运行
 
 ```bash
 cargo build --release
-./target/release/webterm                          # 监听 127.0.0.1:7681，起 $SHELL
-./target/release/webterm --bind 0.0.0.0:7681      # 自定义绑定（请配合反代+TLS+认证）
+./target/release/webterm                                  # 无密码，直接访问（仅限本地）
+./target/release/webterm --bind 0.0.0.0:7681              # 自定义绑定
+./target/release/webterm --password "your-password"       # 带密码认证
 ./target/release/webterm --cmd /bin/bash          # 自定义 shell
 ```
 
