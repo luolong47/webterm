@@ -53,9 +53,9 @@ jobs:
         run: |
           mkdir -p dist
           binary_name="webterm-${{ github.ref_name }}-${{ matrix.target }}"
-          cp target/${{ matrix.target }}/release/webterm "$binary_name"
-          strip "$binary_name" 2>/dev/null || true
-          tar czf "$binary_name.tar.gz" "$binary_name"
+          cp target/${{ matrix.target }}/release/webterm "dist/$binary_name"
+          strip "dist/$binary_name" 2>/dev/null || true
+          tar czf "dist/$binary_name.tar.gz" -C dist "$binary_name"
           echo "PACKAGE_PATH=$binary_name.tar.gz" >> $GITHUB_ENV
           echo "PACKAGE_NAME=$binary_name" >> $GITHUB_ENV
 
