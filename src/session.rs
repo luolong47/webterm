@@ -88,7 +88,7 @@ async fn run_session(mut socket: WebSocket, cmd: Option<String>) {
             },
             out = out_rx.recv() => match out {
                 Some(bytes) => {
-                    if socket.send(Message::Binary(bytes.into())).await.is_err() { break; }
+                    if socket.send(Message::Binary(bytes)).await.is_err() { break; }
                 }
                 None => {
                     // reader EOF：进程已退出
