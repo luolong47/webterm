@@ -8,6 +8,7 @@
     fontFamily: 'Menlo, Consolas, "DejaVu Sans Mono", monospace',
     fontSize: 14,
     scrollback: 5000,
+    allowProposedApi: true,
   });
   var fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);
@@ -16,7 +17,44 @@
 
   var ws = null;
   var authenticated = false;
-  var authBuffer = '';
+
+  // 密码输入覆盖层
+  var overlay = document.createElement('div');
+  overlay.id = 'auth-overlay';
+  overlay.style.cssText = 'display:none;position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:9999;justify-content:center;align-items:center;';
+  var box = document.createElement('div');
+  box.style.cssText = 'background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:32px;width:340px;font-family:monospace;';
+  box.innerHTML = '<div style="color:#0af;font-size:16px;margin-bottom:16px;font-weight:bold;">webterm 需要密码认证</div>' +
+    '<div style="color:#aaa;font-size:13px;margin-bottom:12px;">请输入访问密码</div>' +
+    '<input id="auth-pass" type="password" style="width:100%;padding:8px;font-size:16px;background:#111;color:#fff;border:1px solid #444;border-radius:4px;box-sizing:border-box;" autofocus>' +
+    '<div id="auth-msg" style="margin-top:8px;font-size:13px;"></div>';
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+
+  var passInput = document.getElementById('auth-pass');
+  var authMsg = document.getElementById('auth-msg');
+
+  function showAuth() {
+    overlay.style.display = 'flex';
+    passInput.value = '';
+    authMsg.textContent = '';
+    authMsg.style.color = '#f44';
+    passInput.focus();
+  }
+
+  function hideAuth() {
+    overlay.style.display = 'none';
+  }
+
+  passInput.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') {
+      sendAuth(passInput.value);
+    }
+  });
+
+  function sendAuth(password) {
+    send({ type: 'auth', password: password });
+  }
 
   function connect() {
     var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -24,7 +62,7 @@
     ws.binaryType = 'arraybuffer';
 
     ws.onopen = function () {
-      // 连接建立后等待服务端发送 auth_prompt，不主动发 resize
+      // 连接建立后等待服务端发送 auth_prompt
     };
 
     ws.onmessage = function (ev) {
@@ -39,28 +77,22 @@
         switch (msg.type) {
           case 'auth_prompt':
             authenticated = false;
-            term.write('\r\n\x1b[1;36m   ┌─────────────────────────────┐\r\n');
-            term.write('   │     webterm 需要密码认证    │\r\n');
-            term.write('   └─────────────────────────────┘\x1b[0m\r\n');
-            term.write('\x1b[1mPassword:\x1b[0m ');
-            authBuffer = '';
-            term.cursorStyle = 'bar';
+            showAuth();
             break;
 
           case 'auth_ok':
             authenticated = true;
-            term.write('\r\n\x1b[1;32m  ✓ 认证成功\x1b[0m\r\n\r\n');
-            term.cursorStyle = 'block';
+            hideAuth();
             // 发送初始 resize
             send({ type: 'resize', cols: term.cols, rows: term.rows });
             break;
 
           case 'auth_fail':
             authenticated = false;
-            term.write('\r\n\x1b[1;31m  ✗ ' + escapeHtml(msg.message || '认证失败') + '\x1b[0m\r\n');
-            term.write('\x1b[1mPassword:\x1b[0m ');
-            authBuffer = '';
-            term.cursorStyle = 'bar';
+            authMsg.textContent = msg.message || '认证失败，请重试';
+            authMsg.style.color = '#f44';
+            passInput.value = '';
+            passInput.focus();
             break;
         }
       }
@@ -79,35 +111,6 @@
       ws.send(JSON.stringify(m));
     }
   }
-
-  function escapeHtml(text) {
-    var div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-  }
-
-  // 认证阶段：拦截键盘输入，收集密码
-  term.attachCustomKeyEvent(function (ev) {
-    if (authenticated) return false; // 认证后走正常路径
-
-    if (ev.type === 'keydown') {
-      if (ev.key === 'Enter') {
-        send({ type: 'auth', password: authBuffer });
-        authBuffer = '';
-        return true;
-      } else if (ev.key === 'Backspace') {
-        authBuffer = authBuffer.slice(0, -1);
-        // 回显掩码字符
-        term.write('\b \b');
-        return true;
-      } else if (ev.key.length === 1 && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
-        authBuffer += ev.key;
-        term.write('*'); // 掩码显示
-        return true;
-      }
-    }
-    return false;
-  });
 
   // 认证后的正常输入
   term.onData(function (d) {
