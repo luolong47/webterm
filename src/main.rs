@@ -12,6 +12,8 @@ use tracing::info;
 pub struct AppState {
     /// 覆盖默认 shell（默认用 $SHELL）
     pub cmd: Option<String>,
+    /// 终端访问密码（None 表示无需密码，保持向后兼容）
+    pub password: Option<String>,
 }
 
 #[derive(Parser)]
@@ -24,6 +26,10 @@ struct Args {
     /// 要启动的 shell（默认取 $SHELL）
     #[arg(long)]
     cmd: Option<String>,
+
+    /// 终端访问密码（留空表示无需密码）
+    #[arg(long)]
+    password: Option<String>,
 }
 
 #[tokio::main]
@@ -33,6 +39,7 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState {
         cmd: args.cmd.clone(),
+        password: args.password.clone(),
     };
 
     let app = axum::Router::new()

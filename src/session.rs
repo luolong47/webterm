@@ -1,4 +1,4 @@
-// session.rs —— WebSocket 与 PTY 之间的双向桥接（核心）
+// session.rs —— WebSocket 与 PTY 之间的双向桥接（核心），含密码认证
 use crate::pty;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -13,6 +13,18 @@ use tracing::{info, warn};
 enum ClientMsg {
     Input { data: String },
     Resize { cols: u16, rows: u16 },
+    Auth { password: String },
+}
+
+/// 服务端下行消息（JSON）。
+#[derive(serde::Serialize)]
+enum ServerMsg {
+    #[serde(rename = "auth_prompt")]
+    AuthPrompt,
+    #[serde(rename = "auth_ok")]
+    AuthOk,
+    #[serde(rename = "auth_fail")]
+    AuthFail { message: String },
 }
 
 pub async fn handler(
@@ -20,10 +32,69 @@ pub async fn handler(
     State(state): State<crate::AppState>,
 ) -> impl IntoResponse {
     let cmd = state.cmd.clone();
-    ws.on_upgrade(move |socket| run_session(socket, cmd))
+    let password = state.password.clone();
+    ws.on_upgrade(move |socket| run_session(socket, cmd, password))
 }
 
-async fn run_session(mut socket: WebSocket, cmd: Option<String>) {
+async fn run_session(mut socket: WebSocket, cmd: Option<String>, password: Option<String>) {
+    // 如果需要密码，先走认证流程
+    if let Some(ref expected) = password {
+        // 发送认证提示
+        let prompt = serde_json::to_string(&ServerMsg::AuthPrompt).unwrap();
+        if socket.send(Message::Text(prompt)).await.is_err() {
+            return;
+        }
+
+        // 等待客户端回传密码
+        let authenticated = loop {
+            match socket.recv().await {
+                Some(Ok(Message::Text(t))) => {
+                    match serde_json::from_str::<ClientMsg>(&t) {
+                        Ok(ClientMsg::Auth { password }) => {
+                            if password == *expected {
+                                break true;
+                            } else {
+                                let _ = socket
+                                    .send(Message::Text(
+                                        serde_json::to_string(&ServerMsg::AuthFail {
+                                            message: "密码错误".into(),
+                                        })
+                                        .unwrap(),
+                                    ))
+                                    .await;
+                                continue;
+                            }
+                        }
+                        _ => {
+                            let _ = socket
+                                .send(Message::Text(
+                                    serde_json::to_string(&ServerMsg::AuthFail {
+                                        message: "请先输入密码".into(),
+                                    })
+                                    .unwrap(),
+                                ))
+                                .await;
+                        }
+                    }
+                }
+                Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {}
+                _ => return,
+            }
+        };
+
+        if !authenticated {
+            return;
+        }
+
+        // 认证通过，发送确认
+        let _ = socket
+            .send(Message::Text(
+                serde_json::to_string(&ServerMsg::AuthOk).unwrap(),
+            ))
+            .await;
+    }
+
+    // ---- 以下为 PTY 会话主逻辑（与之前一致）----
     let pty::Pty {
         master,
         mut reader,
@@ -78,6 +149,7 @@ async fn run_session(mut socket: WebSocket, cmd: Option<String>) {
                         Ok(ClientMsg::Resize { cols, rows }) => {
                             let _ = master.resize(PtySize { cols, rows, pixel_width: 0, pixel_height: 0 });
                         }
+                        Ok(ClientMsg::Auth { .. }) => {} // 认证阶段已过，忽略
                         Err(e) => warn!("解析客户端消息失败: {e}"),
                     }
                 }
