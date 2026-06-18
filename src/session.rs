@@ -18,6 +18,7 @@ enum ClientMsg {
 
 /// 服务端下行消息（JSON）。
 #[derive(serde::Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
 enum ServerMsg {
     #[serde(rename = "auth_prompt")]
     AuthPrompt,
@@ -37,13 +38,14 @@ pub async fn handler(
 }
 
 async fn run_session(mut socket: WebSocket, cmd: Option<String>, password: Option<String>) {
-    // 如果需要密码，先走认证流程
+    // 如果需要密码，先走认证流程（PTY 还未启动）
     if let Some(ref expected) = password {
         // 发送认证提示
-        let prompt = serde_json::to_string(&ServerMsg::AuthPrompt).unwrap();
-        if socket.send(Message::Text(prompt)).await.is_err() {
-            return;
-        }
+        let _ = socket
+            .send(Message::Text(
+                serde_json::to_string(&ServerMsg::AuthPrompt).unwrap(),
+            ))
+            .await;
 
         // 等待客户端回传密码
         let authenticated = loop {
@@ -62,18 +64,25 @@ async fn run_session(mut socket: WebSocket, cmd: Option<String>, password: Optio
                                         .unwrap(),
                                     ))
                                     .await;
-                                continue;
+                            }
+                        }
+                        Ok(ClientMsg::Input { data }) => {
+                            // 输入消息也当作密码提交
+                            if data == *expected {
+                                break true;
+                            } else {
+                                let _ = socket
+                                    .send(Message::Text(
+                                        serde_json::to_string(&ServerMsg::AuthFail {
+                                            message: "密码错误".into(),
+                                        })
+                                        .unwrap(),
+                                    ))
+                                    .await;
                             }
                         }
                         _ => {
-                            let _ = socket
-                                .send(Message::Text(
-                                    serde_json::to_string(&ServerMsg::AuthFail {
-                                        message: "请先输入密码".into(),
-                                    })
-                                    .unwrap(),
-                                ))
-                                .await;
+                            // Resize 或其他消息，忽略
                         }
                     }
                 }
@@ -86,7 +95,7 @@ async fn run_session(mut socket: WebSocket, cmd: Option<String>, password: Optio
             return;
         }
 
-        // 认证通过，发送确认
+        // 认证通过
         let _ = socket
             .send(Message::Text(
                 serde_json::to_string(&ServerMsg::AuthOk).unwrap(),
@@ -94,7 +103,7 @@ async fn run_session(mut socket: WebSocket, cmd: Option<String>, password: Optio
             .await;
     }
 
-    // ---- 以下为 PTY 会话主逻辑（与之前一致）----
+    // ---- 以下为 PTY 会话主逻辑 ----
     let pty::Pty {
         master,
         mut reader,
@@ -111,16 +120,15 @@ async fn run_session(mut socket: WebSocket, cmd: Option<String>, password: Optio
         }
     };
 
-    // 输出通道：reader 线程（阻塞读）→ 这里 → socket
     let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
     let reader_handle = tokio::task::spawn_blocking(move || {
         let mut buf = [0u8; 8192];
         loop {
             match reader.read(&mut buf) {
-                Ok(0) => break, // EOF：子进程退出
+                Ok(0) => break,
                 Ok(n) => {
                     if out_tx.blocking_send(buf[..n].to_vec()).is_err() {
-                        break; // 接收端已 drop（会话结束）
+                        break;
                     }
                 }
                 Err(_) => break,
@@ -128,7 +136,6 @@ async fn run_session(mut socket: WebSocket, cmd: Option<String>, password: Optio
         }
     });
 
-    // 写线程：从 in_rx（阻塞）取字节写入 PTY stdin
     let (in_tx, in_rx) = std::sync::mpsc::channel::<Vec<u8>>();
     let writer_handle = tokio::task::spawn_blocking(move || {
         let mut writer = writer;
@@ -139,7 +146,6 @@ async fn run_session(mut socket: WebSocket, cmd: Option<String>, password: Optio
         }
     });
 
-    // 主循环：socket 与 pty 输出二选一
     loop {
         tokio::select! {
             msg = socket.recv() => match msg {
@@ -149,21 +155,20 @@ async fn run_session(mut socket: WebSocket, cmd: Option<String>, password: Optio
                         Ok(ClientMsg::Resize { cols, rows }) => {
                             let _ = master.resize(PtySize { cols, rows, pixel_width: 0, pixel_height: 0 });
                         }
-                        Ok(ClientMsg::Auth { .. }) => {} // 认证阶段已过，忽略
-                        Err(e) => warn!("解析客户端消息失败: {e}"),
+                        Ok(ClientMsg::Auth { .. }) => {} // 认证已完成，忽略
+                        Err(e) => warn!("parse error: {e}"),
                     }
                 }
                 Some(Ok(Message::Binary(b))) => { let _ = in_tx.send(b.to_vec()); }
-                Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+                Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {}
                 Some(Ok(Message::Close(_))) | None => break,
-                Some(Err(e)) => { warn!("websocket 接收错误: {e}"); break; }
+                Some(Err(e)) => { warn!("ws error: {e}"); break; }
             },
             out = out_rx.recv() => match out {
                 Some(bytes) => {
                     if socket.send(Message::Binary(bytes)).await.is_err() { break; }
                 }
                 None => {
-                    // reader EOF：进程已退出
                     let _ = socket
                         .send(Message::Text("\r\n\x1b[2m[process exited]\x1b[0m\r\n".into()))
                         .await;
@@ -174,7 +179,6 @@ async fn run_session(mut socket: WebSocket, cmd: Option<String>, password: Optio
         }
     }
 
-    // 清理：关输入通道→写线程退出；杀子进程；收尸；等两个线程
     drop(in_tx);
     let _ = child.kill();
     let _ = child.wait();
